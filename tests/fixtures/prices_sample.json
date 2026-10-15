@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "currency": "USD",
+  "hours_per_month": 730,
+  "checked_at": "2026-10-01",
+  "source": "sample for tests",
+  "regions": {
+    "ap-northeast-1": {
+      "ebs_gb_month": {"gp2": 0.12, "gp3": 0.096, "io1": 0.142, "io2": 0.142, "st1": 0.054, "sc1": 0.018, "standard": 0.08},
+      "ebs_iops_month": {"gp3": 0.006, "io1": 0.074, "io2": 0.074},
+      "ebs_throughput_mibps_month": {"gp3": 0.048},
+      "public_ipv4_hour": 0.005,
+      "nat_gateway_hour": 0.062,
+      "alb_hour": 0.0243,
+      "nlb_hour": 0.0243,
+      "ec2_linux_hour": {"t3.micro": 0.0136},
+      "rds_hour": {"mysql|single-az|db.t3.micro": 0.028},
+      "rds_storage_gb_month": {"gp2|single-az": 0.138, "gp3|single-az": 0.12, "gp2|multi-az": 0.276},
+      "rds_iops_month": {"io1|single-az": 0.2}
+    }
+  }
+}
