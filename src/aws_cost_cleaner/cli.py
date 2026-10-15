@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+
+from aws_cost_cleaner.errors import (
+    EXIT_USAGE,
+    ApprovalFileError,
+    ConfigError,
+    CostCsvError,
+)
 
 SUBCOMMANDS: tuple[str, ...] = ("scan", "report", "tag", "stop", "delete")
 
@@ -36,3 +43,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     print(f"{args.command}: 未実装", file=sys.stderr)
     return 2
+
+
+def run_with_error_handling(fn: Callable[[], int]) -> int:
+    """Run fn; turn input errors into exit code 2 with a one-line message on stderr."""
+    try:
+        return fn()
+    except (ConfigError, CostCsvError, ApprovalFileError) as exc:
+        message = " ".join(str(exc).splitlines())
+        print(f"{type(exc).__name__}: {message}", file=sys.stderr)
+        return EXIT_USAGE
