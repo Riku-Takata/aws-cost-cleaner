@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aws-cost-cleaner"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3",
+]
+
+[project.scripts]
+aws-cost-cleaner = "aws_cost_cleaner.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aws_cost_cleaner"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "moto[cloudwatch,ec2,elbv2,rds,sts]",
+    "ruff",
+    "mypy",
+    "boto3-stubs[cloudwatch,ec2,elbv2,pricing,rds,resource-explorer-2,sts]",
+    "cfn-lint",
+    "pyyaml",
+    "types-PyYAML",
+]
+
+[tool.ruff]
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"boto3.client" = { msg = "aws.session.client() を使う" }
+"boto3.Session" = { msg = "aws.session.client() を使う" }
+"datetime.datetime.now" = { msg = "clock.Clock を使う" }
+"datetime.datetime.utcnow" = { msg = "clock.Clock を使う" }
+
+[tool.ruff.lint.per-file-ignores]
+"src/aws_cost_cleaner/aws/session.py" = ["TID251"]
+"src/aws_cost_cleaner/clock.py" = ["TID251"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
