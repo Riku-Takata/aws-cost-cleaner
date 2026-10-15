@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "currency": "USD",
+  "hours_per_month": 730,
+  "checked_at": "2026-10-16",
+  "source": "AWS Price List Query API (pricing:GetProducts) / 取得スクリプト scripts/update_prices.py",
+  "regions": {}
+}
