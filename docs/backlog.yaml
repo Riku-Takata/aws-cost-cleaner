@@ -1,0 +1,958 @@
+schema_version: '1.0'
+product: aws-cost-cleaner
+milestones:
+- id: M1
+  title: 検証の土台と純粋モジュール
+  goal: uv run aws-cost-cleaner --help が動き、CI で ruff・mypy --strict・pytest が回る。boto3
+    に依存しない例外・型・タグ・許可表・設定がそろい、Stage 0 の確認記録と Cost Explorer CSV の見本がリポジトリにある
+- id: M2
+  title: scan が動く
+  goal: API の許可リストを通したクライアントで、6 種類のリソースを発見・収集・判定・料金計算し、aws-cost-cleaner scan が scan
+    結果の JSON と要約を出す(moto 上で確かめられる)
+- id: M3
+  title: report が動く
+  goal: aws-cost-cleaner report が scan 結果と任意の Cost Explorer CSV から、Markdown のレポートと承認
+    JSON を AWS を呼ばずに出す
+- id: M4
+  title: 承認にもとづくタグ付け・停止・削除
+  goal: 承認 JSON を使って tag / stop / delete が dry-run と --apply で動き、Keep の保護、2 段階の削除、待ち期間、AWS
+    のエラーの扱いが受け入れテストで確かめられる
+- id: M5
+  title: IAM・ドキュメント・料金表の保守
+  goal: infra/iam-roles.yaml が cfn-lint と静的テストを通り、事前準備・エージェント用プロンプト・README がそろい、同梱の料金表を作り直すスクリプトがある
+tasks:
+- id: T-001
+  title: プロジェクトの土台(pyproject、CI、CLI の骨組み、clock)
+  milestone: M1
+  request: '詳細設計 F-1 と「構成」の表にもとづき、uv の src レイアウトのプロジェクトを作る。pyproject.toml: name は
+    aws-cost-cleaner、requires-python は >=3.12、依存は boto3。dev 依存は pytest、moto[ec2,rds,elbv2,cloudwatch,sts]、ruff、mypy、boto3-stubs[ec2,rds,elbv2,cloudwatch,resource-explorer-2,pricing,sts]、cfn-lint、pyyaml、types-PyYAML。[project.scripts]
+    に aws-cost-cleaner = aws_cost_cleaner.cli:main。uv.lock も入れる。.gitignore に out/
+    と .cache/ を書く。src/aws_cost_cleaner/__init__.py と __main__.py を作る。cli.py には main(argv:
+    Sequence[str] | None = None) -> int を置き、argparse でサブコマンド scan、report、tag、stop、delete
+    を登録する(中身は後のタスクで作る。今は「未実装」と標準エラーに出して 2 を返す)。clock.py: Protocol Clock(now() -> datetime。UTC
+    の aware な値)、SystemClock、FixedClock(dt)。ruff の banned-api(TID251)で boto3.client、boto3.Session、datetime.datetime.now、datetime.datetime.utcnow
+    を禁止し、per-file-ignores で src/aws_cost_cleaner/aws/session.py と src/aws_cost_cleaner/clock.py
+    だけを除く。.github/workflows/ci.yml で uv run ruff check、uv run ruff format --check、uv
+    run mypy --strict src tests、uv run pytest を走らせる(cfn-lint は T-032 で足す)。'
+  acceptance:
+  - uv run aws-cost-cleaner --help が終了コード 0 で、出力に scan、report、tag、stop、delete が含まれる
+  - uv run python -m aws_cost_cleaner --help も終了コード 0 で、同じ 5 つのサブコマンドを表示する
+  - uv run ruff check、uv run ruff format --check、uv run mypy --strict src tests、uv
+    run pytest がすべて終了コード 0 で終わる
+  - FixedClock(dt).now() は dt を返し、SystemClock().now() の utcoffset() は 0 である
+  - pyproject.toml の ruff の banned-api に boto3.client、boto3.Session、datetime.datetime.now、datetime.datetime.utcnow
+    の 4 つがある
+  - .gitignore に out/ と .cache/ の行がある
+  depends_on: []
+  size: M
+  human_check: ''
+  status: todo
+- id: T-002
+  title: 例外の階層と終了コード(errors.py)
+  milestone: M1
+  request: '詳細設計 F-2 の例外の階層を src/aws_cost_cleaner/errors.py に作る。クラス名は AwsCostCleanerError、ConfigError、CostCsvError、ApprovalFileError、AccountMismatchError(ApprovalFileError
+    の子)、DisallowedApiCallError、ProtectedResourceError、NotCandidateError、StateMismatchError、WaitPeriodNotElapsedError、AwsOperationError。AwsOperationError
+    は __init__(self, message: str, aws_error_code: str | None) で、属性 aws_error_code
+    を持つ。同じファイルに定数 EXIT_OK = 0、EXIT_PARTIAL_FAILURE = 1、EXIT_USAGE = 2 を置く。cli.py に
+    run_with_error_handling(fn: Callable[[], int]) -> int を足す。fn が ConfigError、CostCsvError、ApprovalFileError(子を含む)を出したら、標準エラーにメッセージを
+    1 行出して 2 を返す。それ以外は fn の戻り値をそのまま返す。'
+  acceptance:
+  - ConfigError から AwsOperationError までの 10 クラスは、すべて AwsCostCleanerError の子である
+  - AccountMismatchError は ApprovalFileError の子である
+  - AwsOperationError('x', 'SomeCode').aws_error_code == 'SomeCode'
+  - EXIT_OK、EXIT_PARTIAL_FAILURE、EXIT_USAGE がそれぞれ 0、1、2 である
+  - run_with_error_handling は、ConfigError・CostCsvError・ApprovalFileError・AccountMismatchError
+    を出す関数について 2 を返し、標準エラーに 1 行出す
+  - 'run_with_error_handling(lambda: 1) は 1 を返す'
+  depends_on:
+  - T-001
+  size: S
+  human_check: ''
+  status: todo
+- id: T-003
+  title: データの型(models.py)
+  milestone: M1
+  request: '詳細設計 データ 5・6・9 と F-5 にもとづき、src/aws_cost_cleaner/models.py に型を置く(boto3
+    に依存しない)。ResourceType = Literal[''ebs_volume'',''elastic_ip'',''nat_gateway'',''load_balancer'',''ec2_instance'',''rds_instance'']、Action
+    = Literal[''Stop'',''Delete'']、SkipReason はデータ 5 の skip_reason の表の 11 個の Literal。frozen
+    dataclass: Resource(resource_type, region, resource_id, arn: str | None, name:
+    str | None, tags: Mapping[str, str], state: str, created_at: datetime | None,
+    attrs: Mapping[str, Any])、Finding(データ 5 の findings の要素と同名のフィールド)、Skipped(resource_type,
+    region, resource_id, skip_reason)、DiscoveryInfo(method, warnings: tuple[str, ...])、ScanResult(データ
+    5 の最上位のキーと同名。discovery は DiscoveryInfo)、ApprovalItem(データ 6 の items の要素と同名)、Outcome(データ
+    9 のとおり)。Finding、Skipped、ScanResult、ApprovalItem は to_dict() -> dict[str, Any]
+    と classmethod from_dict を持ち、to_dict のキーはデータ 5・6 の JSON と同じにする。'
+  acceptance:
+  - データ 5 の例と同じ形の dict d について、ScanResult.from_dict(d).to_dict() == d
+  - データ 6 の items の例と同じ形の dict e について、ApprovalItem.from_dict(e).to_dict() == e
+  - Finding.to_dict() のキーの集合は、データ 5 の findings の要素のキーの集合と一致する
+  - estimated_monthly_usd が None の Finding を json.dumps すると null になる
+  - Resource と Outcome の属性に代入すると dataclasses.FrozenInstanceError になる
+  depends_on:
+  - T-002
+  size: M
+  human_check: ''
+  status: todo
+- id: T-004
+  title: Outcome の表示と終了コード
+  milestone: M1
+  request: 'src/aws_cost_cleaner/models.py に render_outcomes(outcomes: Sequence[Outcome])
+    -> str と exit_code_for_outcomes(outcomes: Sequence[Outcome]) -> int を足す(詳細設計 データ
+    9)。render_outcomes は 1 項目を 1 行で出す。各行は status、action、resource_type、region、resource_id、error
+    の例外クラス名、aws_error_code、note をタブでつなぎ、値がない欄は - にする。最後の行は planned=<n> done=<n> skipped=<n>
+    failed=<n> にする。exit_code_for_outcomes は failed が 1 件でもあれば 1、なければ 0 を返す。'
+  acceptance:
+  - Outcome 2 件を渡すと、出力は 3 行になる
+  - error が StateMismatchError の行には、タブ区切りの 6 番目の欄に StateMismatchError と出る
+  - error、aws_error_code、note が None の欄は - になる
+  - 最後の行は planned=<n> done=<n> skipped=<n> failed=<n> の形で、件数が正しい
+  - failed が 1 件あれば exit_code_for_outcomes は 1、空のリストや failed がないときは 0 を返す
+  depends_on:
+  - T-003
+  size: S
+  human_check: ''
+  status: todo
+- id: T-005
+  title: タグの定数と判定(tags.py)
+  milestone: M1
+  request: '詳細設計 データ 1 にもとづき、src/aws_cost_cleaner/tags.py を作る(boto3 に依存しない)。定数は KEEP
+    = ''Keep''、CLEANUP_CANDIDATE = ''CleanupCandidate''、CLEANUP_REASON = ''CleanupReason''、CLEANUP_STOPPED_AT
+    = ''CleanupStoppedAt''。関数は is_protected(tags: Mapping[str, str]) -> bool(Keep
+    の値を strip().lower() して ''true'' と比べる)、is_candidate(tags) -> bool(CleanupCandidate
+    の値が ''true'' と完全に一致するときだけ True)、parse_stopped_at(value: str | None) -> datetime
+    | None(datetime.fromisoformat で読む。タイムゾーンがない値、読めない値、None は None)、format_stopped_at(dt:
+    datetime) -> str(UTC に直して %Y-%m-%dT%H:%M:%SZ)。'
+  acceptance:
+  - is_protected は Keep が 'true'、'True'、' TRUE ' で True、'false' やキーがないときは False
+  - is_candidate は 'true' で True、'True' や 'TRUE' やキーがないときは False
+  - parse_stopped_at('2026-10-08T03:00:00Z') は 2026-10-08 03:00:00 UTC の aware な datetime
+    を返す
+  - parse_stopped_at は '2026-10-08T03:00:00'(タイムゾーンなし)、'abc'、None について None を返す
+  - format_stopped_at(datetime(2026,10,15,12,0,0, tzinfo=+09:00)) は '2026-10-15T03:00:00Z'
+    を返す
+  depends_on:
+  - T-001
+  size: S
+  human_check: ''
+  status: todo
+- id: T-006
+  title: 種類 × アクション × 理由コードの許可表(catalog.py)
+  milestone: M1
+  request: '詳細設計 データ 2 にもとづき、src/aws_cost_cleaner/catalog.py を作る(boto3 に依存しない)。ALLOWED:
+    frozenset[tuple[ResourceType, Action, str]] にデータ 2 の 8 行を持つ。is_allowed(resource_type,
+    action, reason_code) -> bool。RESOURCE_TYPES は ebs_volume、elastic_ip、nat_gateway、load_balancer、ec2_instance、rds_instance
+    の順のタプル。service_label(resource_type, lb_type: str | None = None) -> str は「目的と範囲」の表の表示名(EC2
+    (EBS)、VPC (EIP)、VPC (NAT)、EC2、RDS)を返す。load_balancer では lb_type が ''application''
+    なら ''ELB (ALB)''、''network'' なら ''ELB (NLB)'' を返し、それ以外は ValueError を出す。'
+  acceptance:
+  - ALLOWED はちょうど 8 要素で、データ 2 の表と一致する
+  - is_allowed('ec2_instance', 'Delete', 'ec2-low-cpu') は False、is_allowed('ec2_instance',
+    'Delete', 'ec2-stopped-elapsed') は True
+  - RESOURCE_TYPES は request に書いた順の 6 要素のタプルである
+  - service_label('load_balancer', 'application') == 'ELB (ALB)'、service_label('load_balancer',
+    'network') == 'ELB (NLB)'
+  - service_label('ebs_volume') == 'EC2 (EBS)'、service_label('elastic_ip') == 'VPC
+    (EIP)'
+  depends_on:
+  - T-003
+  size: S
+  human_check: ''
+  status: todo
+- id: T-007
+  title: 設定の読み込み(config.py)と設定ファイルの例
+  milestone: M1
+  request: '詳細設計 データ 3 にもとづき、src/aws_cost_cleaner/config.py を作る。frozen dataclass:
+    ScanConfig(resource_explorer_region: str, regions: tuple[str, ...], max_metric_requests:
+    int)、Thresholds(period_days: int, ec2_cpu_max_percent: float, ec2_network_bytes_max:
+    int, rds_connections_max: int, nat_bytes_max: int, stop_wait_days: int)、PricingConfig(use_price_list_api:
+    bool, cache_ttl_hours: int)、Config(scan, thresholds, pricing)。Thresholds.stop_wait_days
+    は TOML の [actions] から読む。load_config(path: Path | None, overrides: Mapping[str,
+    object] | None = None) -> Config。overrides のキーは節名なしの TOML のキー名(period_days、regions
+    など)で、値が None のものは無視する。標準値はデータ 3 の例のとおり(use_price_list_api は true)。範囲(period_days
+    >= 1、stop_wait_days >= 1、ec2_cpu_max_percent は 0–100、max_metric_requests >= 0、ec2_network_bytes_max
+    >= -1)、型の違い、未知の節やキーは ConfigError にする。リポジトリ直下に aws-cost-cleaner.example.toml をデータ
+    3 の内容(コメントつき)で作る。'
+  acceptance:
+  - load_config(None) は データ 3 の標準値(period_days=7、ec2_cpu_max_percent=5.0、ec2_network_bytes_max=-1、rds_connections_max=0、nat_bytes_max=0、stop_wait_days=7、max_metric_requests=1000、use_price_list_api=True、cache_ttl_hours=24)を返す
+  - TOML に書いた値が標準値を上書きし、overrides の値が TOML の値を上書きする
+  - period_days=0、stop_wait_days=0、ec2_cpu_max_percent=101 のどれでも ConfigError になる
+  - '未知のキー(例: [thresholds] perod_days)で ConfigError になる'
+  - load_config(Path('aws-cost-cleaner.example.toml')) は load_config(None) と等しい
+  depends_on:
+  - T-002
+  size: M
+  human_check: ec2_network_bytes_max の標準値 -1(判定に使わない)でよいかを、開発者が決める。
+  status: todo
+- id: T-008
+  title: 'Stage 0: 公式ドキュメントでの確認を記録する(調べ物)'
+  milestone: M1
+  request: '詳細設計「検証の方針」の Stage 0 の表 #1〜#14 を、AWS の公式ドキュメントで確かめて docs/verification-notes.md
+    に記録する。コードとテストは書かない・変えない。#7 は、コンソールでグループ化の条件をいくつ選べるかと、EBS・NAT・EIP がどのサービス名に入るかだけを調べる(CSV
+    の列の形式は T-010 で扱う)。確かめられなかった点は、結論に「未確認」と書く。#11 で条件キーに対応していないアクションが見つかったら、結論にそのアクション名を書く(設計や実装は変えない)。'
+  acceptance:
+  - docs/verification-notes.md に見出し「## 公式ドキュメントでの確認」がある
+  - 'その見出しの下の表の列は、順に #、確かめること、結論、URL、確認日 である'
+  - '表には # が 1〜14 の行が 1 行ずつ、ちょうど 14 行ある'
+  - どの行も結論の欄が空でない
+  - URL の欄は https:// で始まるか、未確認の行では - である。確認日は YYYY-MM-DD の形である
+  depends_on: []
+  size: M
+  human_check: '開発者が結論を読み、特に #1(Resource Explorer の料金)、#5(Price List API)、#11(条件キー)の結果によって設計の見直しが要るかを決める。'
+  status: todo
+- id: T-009
+  title: 'Stage 0: moto の対応状況を確かめて記録する(調べ物)'
+  milestone: M1
+  request: '詳細設計「ライブラリの確認」にもとづき、uv.lock の moto の版で次を実際に試し、docs/verification-notes.md
+    に記録する。対象: resource-explorer-2 の Search、pricing の GetProducts、rds の stop_db_instance、elbv2
+    の describe_target_health、cloudwatch の get_metric_statistics、ELBv2 の Type=gateway
+    のロードバランサの作成。また、ID を指定した DescribeVolumes、DescribeAddresses、DescribeNatGateways、DescribeLoadBalancers、DescribeInstances、DescribeDBInstances
+    で、存在しない ID を渡したときに moto が返すエラーコード。試したスクリプトはリポジトリに入れない。src/ と tests/ は変えない。'
+  acceptance:
+  - docs/verification-notes.md に見出し「## ライブラリの確認」がある
+  - その見出しの下の表の列は、順に 対象、moto の版、結果、テストでの扱い である
+  - 結果の欄は 対応、未対応、一部対応 のどれかで始まり、テストでの扱いの欄は moto か Stubber である
+  - 存在しない ID の行が 6 つあり、それぞれ結果の欄に moto が返したエラーコード(または「エラーにならない」)が書いてある
+  - src/ と tests/ に変更がない
+  depends_on:
+  - T-001
+  - T-008
+  size: S
+  human_check: ''
+  status: todo
+- id: T-010
+  title: Cost Explorer の CSV の見本を置き、形式を記録する
+  milestone: M1
+  request: '詳細設計 データ 8 と Stage 0 #7 のために、開発者が Cost Explorer のコンソールから出力した CSV(サービス別とリージョン別の
+    2 つ。金額は書き換えてよい)を tests/fixtures/cost_by_service.csv と tests/fixtures/cost_by_region.csv
+    として置く。受け取ったファイルをそのまま置き、自分で中身を作らない。docs/verification-notes.md に見出し「## Cost Explorer
+    CSV の形式」を足し、表で、ヘッダー行、期間の列、合計の列の名前、合計の行の 1 列目の値、空のセルの有無、EBS・NAT・EIP・EC2・RDS・ELB
+    の金額が入る列名を書く。コードは書かない。'
+  acceptance:
+  - tests/fixtures/cost_by_service.csv と tests/fixtures/cost_by_region.csv がある
+  - どちらも Python の csv モジュールで encoding='utf-8-sig' で読め、ヘッダー行と 1 行以上のデータの行がある
+  - docs/verification-notes.md に見出し「## Cost Explorer CSV の形式」がある
+  - その下の表の列は、順に 項目、見本での値 である
+  - 表に、ヘッダー行、期間の列、合計の列、合計の行、空のセル、EBS、NAT、EIP、EC2、RDS、ELB の 11 行がある
+  depends_on:
+  - T-009
+  size: S
+  human_check: 置いた CSV が実際にコンソールから出力したものであることを、開発者が確かめる。CSV は開発者が用意する。
+  status: todo
+- id: T-011
+  title: API の許可リストとクライアントの生成(aws/guard.py、aws/session.py)
+  milestone: M2
+  request: '詳細設計 F-3 にもとづき、src/aws_cost_cleaner/aws/__init__.py、guard.py、session.py
+    を作る。Mode = Literal[''read'',''tag'',''execute'']。guard.py: ALLOWED_OPERATIONS:
+    Mapping[Mode, frozenset[str]](要素は ''<boto3 のサービス名>:<操作名>''。例 ''ec2:DescribeVolumes''、''elbv2:AddTags''。F-3
+    の表のとおりで、read には pricing:GetProducts を含める)。ALLOWED_TAG_KEYS: tag は {CleanupCandidate,
+    CleanupReason}、execute は {CleanupStoppedAt}。install_guard(client, mode) は client.meta.events
+    の before-call.*.* にフックを登録し、許可にない操作で DisallowedApiCallError を出す。ec2:CreateTags、rds:AddTagsToResource、elbv2:AddTags
+    では Tags のキーも確かめ、許可外なら DisallowedApiCallError。session.py: class ClientFactory(mode:
+    Mode, profile: str | None = None)。メソッド client(service: str, region: str) は boto3.Session(profile_name=profile)
+    からクライアントを作り、必ず install_guard してから返す。同じ (service, region) は使い回す。'
+  acceptance:
+  - read の ClientFactory で ec2:RunInstances、cloudwatch:GetMetricData、ce:GetCostAndUsage、s3:ListObjectsV2
+    を呼ぶと DisallowedApiCallError になる(moto 環境で、AWS に届く前に止まる)
+  - tag モードで CreateTags に Keep または CleanupStoppedAt のキーを渡すと DisallowedApiCallError、CleanupCandidate
+    と CleanupReason だけなら通る
+  - tag モードで ec2:TerminateInstances を呼ぶと DisallowedApiCallError になる
+  - execute モードで CreateTags に CleanupCandidate を渡すと DisallowedApiCallError、CleanupStoppedAt
+    だけなら通る
+  - ALLOWED_OPERATIONS の tag と execute に resource-explorer-2:Search、cloudwatch:GetMetricStatistics、pricing:GetProducts
+    が含まれない
+  - ClientFactory('read').client('ec2', 'ap-northeast-1') を 2 回呼ぶと同じオブジェクトが返る
+  depends_on:
+  - T-002
+  - T-005
+  size: M
+  human_check: ''
+  status: todo
+- id: T-012
+  title: '判定ルール: 候補でないリソース(rules.py)'
+  milestone: M2
+  request: '詳細設計 F-7 の「候補でないリソース」とデータ 4 にもとづき、src/aws_cost_cleaner/rules.py を作る(boto3
+    に依存しない)。has_elapsed(now: datetime, since: datetime, days: int) -> bool は now -
+    since >= timedelta(days=days)。evaluate(resource: Resource, metrics: Mapping[str,
+    float | None], thresholds: Thresholds, now: datetime) -> Finding | Skipped。このタスクでは
+    CleanupCandidate のないリソースだけを扱う(候補済みは T-013)。metrics のキー: EC2 は cpu_max_percent、network_bytes_total、RDS
+    は db_connections_max、rds_cpu_max_percent、NAT は nat_bytes_total。判定の順は、期間に満たない →
+    too_new、判定に要る値が None → no_metrics、条件を満たさない → active。ELB は attrs[''registered_target_count'']、EIP
+    は attrs.get(''AssociationId'') が None なら未関連付け。reason_text と state_summary は F-7
+    の例の文面にする。service_label は catalog.service_label を使い、estimated_monthly_usd と price_source
+    は None にする。'
+  acceptance:
+  - 起動から 7 日以上の running の EC2 で cpu_max_percent=4.99 なら Finding(Stop, ec2-low-cpu)、5.0
+    なら Skipped(active)
+  - 作成から 7 日以上の available の RDS で db_connections_max=0 なら Finding(Stop, rds-no-connections)、1
+    なら Skipped(active)
+  - 起動からちょうど 7 日なら判定の対象になり、6 日 23 時間 59 分 59 秒なら Skipped(too_new)
+  - cpu_max_percent が None なら Skipped(no_metrics)
+  - ec2_network_bytes_max=-1 なら network_bytes_total を見ない。0 にして network_bytes_total=10
+    なら Skipped(active)
+  - available の EBS は Finding(Delete, ebs-unattached)、registered_target_count=0 の
+    ELB は Finding(Delete, elb-no-targets)、nat_bytes_total=0 で 7 日以上の NAT は Finding(Delete,
+    nat-idle)
+  depends_on:
+  - T-003
+  - T-005
+  - T-006
+  - T-007
+  size: M
+  human_check: ''
+  status: todo
+- id: T-013
+  title: '判定ルール: 候補済みのリソース(rules.py)'
+  milestone: M2
+  request: rules.evaluate に、詳細設計 F-7 の「候補済みのリソース」の表を足す。tags.is_candidate(resource.tags)
+    が True のときは、メトリクスを見ずにこの表で判定する。CleanupStoppedAt は tags.parse_stopped_at で読み、経過は
+    has_elapsed(now, stopped_at, thresholds.stop_wait_days) で比べる。reason_text は「候補として
+    <YYYY-MM-DD> に停止し、<N> 日経過。削除の承認を求める」(N は経過日数の切り捨て)。state_summary は stopped なら「stopped
+    (<YYYY-MM-DD> から停止)」、RDS が available なら「停止後に起動(自動起動の可能性)」を含める。
+  acceptance:
+  - 候補済みで stopped の EC2 は、停止からちょうど 7 日なら Finding(Delete, ec2-stopped-elapsed)、1 秒足りなければ
+    Skipped(stop_wait_pending)
+  - 候補済みで stopped の EC2 は、CleanupStoppedAt がないか 'abc' なら Skipped(stop_not_recorded)
+  - 候補済みで running の EC2 は、CleanupStoppedAt があれば Skipped(restarted_after_stop)、なければ
+    Skipped(already_candidate)
+  - 候補済みで available の RDS は、経過済みなら Finding(Delete, rds-stopped-elapsed) で、state_summary
+    に「自動起動の可能性」を含む
+  - 候補済みの RDS は、stopped でタグがなければ stop_not_recorded、available でタグがなければ already_candidate
+  - 候補済みの EBS、EIP、NAT、ELB は Skipped(already_candidate)
+  depends_on:
+  - T-012
+  size: M
+  human_check: ''
+  status: todo
+- id: T-014
+  title: メトリクスの取得と呼び出し回数の上限(metrics.py)
+  milestone: M2
+  request: '詳細設計 F-6 にもとづき、src/aws_cost_cleaner/metrics.py を作る。class MetricsFetcher(factory:
+    ClientFactory, thresholds: Thresholds, max_requests: int, clock: Clock)。fetch(resource:
+    Resource) -> Mapping[str, float | None] | None。呼ぶのは factory.client(''cloudwatch'',
+    resource.region) の GetMetricStatistics だけ。Period=86400、EndTime=now、StartTime=now
+    - period_days 日。必要な回数は EC2 が 1(ec2_network_bytes_max >= 0 なら 3)、RDS が 2、NAT が
+    2。その回数を足すと max_requests を超えるときは呼ばずに None を返し、以後はすべて None を返す。返すキーは T-012 と同じ(cpu_max_percent、network_bytes_total、db_connections_max、rds_cpu_max_percent、nat_bytes_total)。Maximum
+    は全データポイントの最大、Sum は合計。データポイントが 0 件ならその値は None。ディメンションは InstanceId、DBInstanceIdentifier、NatGatewayId。ほかの種類では呼ばずに
+    {} を返す。属性 requests_used: int を持つ。'
+  acceptance:
+  - ec2_network_bytes_max=-1 の EC2 では GetMetricStatistics を 1 回(AWS/EC2、CPUUtilization、Maximum、Period=86400)だけ呼ぶ
+  - ec2_network_bytes_max=0 の EC2 では 3 回呼び、network_bytes_total は NetworkIn と NetworkOut
+    の Sum の合計になる
+  - max_requests=1 で EC2 を 2 件渡すと、1 件目は dict、2 件目は None になり、requests_used は 1
+  - データポイントが 0 件のメトリクスの値は None になる
+  - RDS の db_connections_max は DatabaseConnections の Maximum の最大値になる
+  - EBS を渡すと {} が返り、API を呼ばない
+  depends_on:
+  - T-011
+  - T-007
+  - T-009
+  size: M
+  human_check: ''
+  status: todo
+- id: T-015
+  title: リソースの発見(discovery.py)
+  milestone: M2
+  request: '詳細設計 F-4 にもとづき、src/aws_cost_cleaner/discovery.py を作る。DiscoveryResult は
+    F-4 のとおり。discover(factory: ClientFactory, config: Config) -> DiscoveryResult。定数
+    RESOURCE_EXPLORER_TYPES: Mapping[ResourceType, tuple[str, ...]] は F-4 の表のとおり(load_balancer
+    は ''elasticloadbalancing:loadbalancer/app'' と ''elasticloadbalancing:loadbalancer/net'')。Search
+    は config.scan.resource_explorer_region のクライアントで、QueryString=''resourcetype:<t>''
+    で NextToken をたどり、各リソースの Region を集める。Count.Complete が false の種類は、有効なリージョン(同じリージョンの
+    ec2:DescribeRegions の RegionName)ごとに QueryString=''resourcetype:<t> region:<r>''、MaxResults=1
+    で呼ぶ。config.scan.regions が空でなければ Search を呼ばず explicit_regions。Search の ClientError
+    では fallback_all_regions にし、警告 ''resource-explorer unavailable: <Error.Code>''
+    を入れる。テストは botocore の Stubber と tests/fixtures/ の応答の見本で行う。'
+  acceptance:
+  - Complete=true の応答の見本から、種類ごとに正しいリージョンの集合が出て、method は resource_explorer
+  - 'Complete=false の種類では、有効なリージョンごとに region: 付きの QueryString と MaxResults=1 で Search
+    を呼び、1 件返ったリージョンだけが集合に入る'
+  - 'Search が ClientError(コードは任意)を返すと、method は fallback_all_regions、6 種類すべてが有効なリージョン全部になり、warnings
+    に ''resource-explorer unavailable: <コード>'' が入る'
+  - config.scan.regions を指定すると Search を 1 回も呼ばず、method は explicit_regions で、6 種類すべてがそのリージョンの集合になる
+  - load_balancer の集合は、/app と /net の両方の resourcetype の結果を合わせたものになる
+  depends_on:
+  - T-011
+  - T-007
+  - T-009
+  size: M
+  human_check: ''
+  status: todo
+- id: T-016
+  title: 'コレクタ: EBS、EIP、NAT(collectors/)'
+  milestone: M2
+  request: '詳細設計 F-5 にもとづき、src/aws_cost_cleaner/collectors/ を作る。collectors/__init__.py
+    に frozen dataclass CollectResult(resources: tuple[Resource, ...], skipped: tuple[Skipped,
+    ...]) と COLLECTORS: Mapping[ResourceType, Callable[[ClientFactory, str], CollectResult]]
+    を置く。このタスクでは ebs.py、eip.py、nat.py を作り、それぞれの collect(factory, region) -> CollectResult
+    を COLLECTORS に登録する。取り出す条件と attrs は F-5 の表のとおりで、ページ送りを行う。Resource の state は、EBS
+    が State、EIP は ''unassociated''、NAT は State。name は Name タグの値(EIP は PublicIp)。arn
+    は None。tags はキーと値の dict。created_at は F-5 の表のとおり(EIP は None)。正規化は、ID 指定の取り直し(T-027)からも使えるよう、モジュールの関数(to_resource)に分ける。'
+  acceptance:
+  - moto で作った available の EBS は Resource になり、attrs に Size、VolumeType、Iops、Throughput
+    がある。in-use の EBS は入らない
+  - 関連付けのない EIP は Resource になり、resource_id は AllocationId、name は PublicIp。関連付けのある
+    EIP は入らない
+  - available の NAT は Resource になり、attrs に ConnectivityType がある
+  - Keep=true のタグは tags にそのまま残る(コレクタでは除外しない)
+  - COLLECTORS のキーに ebs_volume、elastic_ip、nat_gateway がある
+  depends_on:
+  - T-011
+  - T-005
+  - T-003
+  - T-009
+  size: M
+  human_check: ''
+  status: todo
+- id: T-017
+  title: 'コレクタ: ELB、EC2、RDS(collectors/)'
+  milestone: M2
+  request: 'collectors/ に elb.py、ec2.py、rds.py を足し、COLLECTORS に登録する(詳細設計 F-5)。ELB:
+    DescribeLoadBalancers の Type が application か network のものを Resource にし、gateway
+    は Skipped(unsupported_lb_type)。resource_id は LoadBalancerName、arn は LoadBalancerArn、tags
+    は DescribeTags、state は State.Code、attrs は Type と registered_target_count(DescribeTargetGroups(LoadBalancerArn=…)
+    の各グループの DescribeTargetHealth の件数の合計)。EC2: running はすべて、stopped は tags.is_candidate
+    のものだけ。state は State.Name、created_at は LaunchTime、attrs は InstanceType と Platform(ないときは
+    None)。RDS: available はすべて、stopped は候補だけ。DBClusterIdentifier があるか Engine が aurora
+    で始まるものは Skipped(aurora)。resource_id は DBInstanceIdentifier、arn は DBInstanceArn、tags
+    は TagList、state は DBInstanceStatus、created_at は InstanceCreateTime、attrs は F-5
+    の表のとおり。正規化は to_resource に分ける。'
+  acceptance:
+  - running の EC2 は入る。stopped の EC2 は CleanupCandidate=true のときだけ入る
+  - available の RDS は入り、attrs に Engine、DBInstanceClass、MultiAZ、AllocatedStorage、StorageType、Iops
+    がある
+  - Engine が aurora で始まる、または DBClusterIdentifier がある RDS は Skipped(aurora) になる
+  - ターゲットグループのない ALB の registered_target_count は 0、ターゲットを 1 件登録したグループを持つ ALB は 1
+  - Type=gateway のロードバランサは Skipped(unsupported_lb_type) になる(moto が対応していなければ Stubber
+    で確かめる)
+  - COLLECTORS のキーが 6 種類すべてになる
+  depends_on:
+  - T-016
+  size: M
+  human_check: ''
+  status: todo
+- id: T-018
+  title: 同梱の料金表と読み込み(pricing/table.py、data/prices.json)
+  milestone: M2
+  request: '詳細設計 データ 7 にもとづき、src/aws_cost_cleaner/pricing/__init__.py、table.py、data/prices.json
+    と tests/unit/test_prices_schema.py を作る。table.py: frozen dataclass PriceValue(usd:
+    float, kind: Literal[''price_list_api'',''cache'',''bundled''], as_of: str)、Protocol
+    PriceLookup(get(region: str, key: str, sub: str | None = None) -> PriceValue |
+    None)、class BundledPriceTable(PriceLookup を実装。kind=''bundled''、as_of は checked_at)。classmethod
+    from_file(path: Path) と load_default()(importlib.resources でパッケージデータを読む)。key はデータ
+    7 の regions の下の 11 個のキー、sub は入れ子の中のキー(gp3、t3.micro、mysql|single-az|db.t3.micro
+    など)。見つからないときは None。data/prices.json はデータ 7 のスキーマで、regions を {} にする(値は T-035 のスクリプトで作る)。pyproject.toml
+    で prices.json をパッケージデータに含める。'
+  acceptance:
+  - BundledPriceTable.load_default() は例外なく読め、どの get も None を返す
+  - tests/fixtures/ の見本の表を from_file で読むと、get('ap-northeast-1', 'ebs_gb_month', 'gp3')
+    が kind='bundled'、as_of=checked_at の PriceValue を返す
+  - ないリージョン、ないキー、ない sub では None を返す
+  - test_prices_schema.py は、最上位のキー(schema_version、currency、hours_per_month、checked_at、source、regions)、各リージョンの
+    11 個のキー、数値が 0 以上、checked_at が YYYY-MM-DD であることを確かめ、同梱の prices.json で通る
+  - uv build で作った wheel に aws_cost_cleaner/pricing/data/prices.json が入っている
+  depends_on:
+  - T-001
+  size: S
+  human_check: ''
+  status: todo
+- id: T-019
+  title: 月額の計算(pricing/estimate.py)
+  milestone: M2
+  request: 'src/aws_cost_cleaner/pricing/estimate.py を作る(詳細設計 データ 7 の月額の計算の表)。ChainedPriceLookup(lookups:
+    Sequence[PriceLookup]) は先頭から試し、最初に None でない値を返す。estimate_monthly(resource: Resource,
+    lookup: PriceLookup, hours_per_month: int = 730) -> tuple[float | None, dict[str,
+    str] | None] は (月額, {''kind'': …, ''as_of'': …}) を返す。キー: EBS は ebs_gb_month[VolumeType]、gp3
+    の超過分は ebs_iops_month[gp3] と ebs_throughput_mibps_month[gp3]、io1/io2 は ebs_iops_month[VolumeType]
+    × Iops。EIP は public_ipv4_hour、NAT は nat_gateway_hour、ELB は Type が application
+    なら alb_hour、network なら nlb_hour。EC2 は ec2_linux_hour[InstanceType]。state が stopped
+    の EC2 は (0.0, None)。RDS は rds_hour[''<Engine>|<single-az か multi-az>|<DBInstanceClass>'']
+    と rds_storage_gb_month[''<StorageType>|<az>''] × AllocatedStorage、io1/io2 は rds_iops_month[''<StorageType>|<az>'']
+    × Iops を足す。stopped の RDS はインスタンス分を 0 にする。必要な料金が 1 つでも欠けたら (None, None)。複数の料金の
+    kind は price_list_api、cache、bundled の順で最も後ろのもの、as_of は最も古い日付。'
+  acceptance:
+  - gp3、100 GB、4000 IOPS、250 MiB/s の EBS の月額は 100×GB 単価 + 1000×IOPS 単価 + 125×スループット単価
+    になる
+  - EIP、NAT、ALB の月額は、それぞれの時間単価 × 730 になる
+  - stopped の EC2 は (0.0, None) になる
+  - multi-az の RDS の月額は、インスタンス × 730 + ストレージ単価 × AllocatedStorage になり、stopped の RDS
+    はストレージの分だけになる
+  - 必要な料金が 1 つ欠けると (None, None) になる
+  - ChainedPriceLookup は 1 つ目が None なら 2 つ目の値を返し、bundled と price_list_api を混ぜて使うと
+    kind は bundled、as_of は古いほうの日付になる
+  depends_on:
+  - T-018
+  - T-003
+  size: M
+  human_check: ''
+  status: todo
+- id: T-020
+  title: Price List API とキャッシュ(pricing/price_list.py)
+  milestone: M2
+  request: 'src/aws_cost_cleaner/pricing/price_list.py を作る(詳細設計 データ 7 の料金の取り方 1・2)。class
+    PriceListLookup(factory: ClientFactory, clock: Clock, cache_dir: Path)は PriceLookup
+    を実装する。pricing クライアントは factory.client(''pricing'', ''us-east-1'') で作る。get は (region,
+    key, sub) を GetProducts の Filters に変換し、応答の PriceList(JSON 文字列)の terms.OnDemand
+    の pricePerUnit.USD を返す(kind=''price_list_api''、as_of は今日の UTC 日付)。フィルタの属性名と値は、docs/verification-notes.md
+    の #6 の結論を定数 FILTERS に書く(結論が未確認の key では API を呼ばずに None)。取れた値は cache_dir の JSON
+    に保存する。class CachedPriceLookup(cache_dir: Path, clock: Clock, ttl_hours: int)は、保存から
+    ttl_hours 以内の値を kind=''cache'' で返す。ClientError と空の PriceList は None。標準の cache_dir
+    は ~/.cache/aws-cost-cleaner/prices/。'
+  acceptance:
+  - Stubber で GetProducts の応答の見本を返すと、PriceListLookup.get は kind='price_list_api' の
+    PriceValue を返し、クライアントのリージョンは us-east-1 である
+  - 取得に成功すると cache_dir に JSON ができ、CachedPriceLookup.get が同じ値を kind='cache' で返す
+  - FixedClock を ttl_hours より先に進めると、CachedPriceLookup.get は None を返す
+  - GetProducts が ClientError を返すとき、または PriceList が空のとき、PriceListLookup.get は None
+    を返す
+  - PriceListLookup は pricing:GetProducts 以外の操作を呼ばない
+  depends_on:
+  - T-018
+  - T-011
+  - T-008
+  size: M
+  human_check: ''
+  status: todo
+- id: T-021
+  title: scan の処理全体(scan.py)
+  milestone: M2
+  request: '詳細設計 F-8 の処理の流れを、src/aws_cost_cleaner/scan.py の run_scan(factory: ClientFactory,
+    config: Config, clock: Clock, price_lookup: PriceLookup) -> ScanResult に作る。順に、sts:GetCallerIdentity
+    → discovery.discover → 種類ごと・リージョンごとに COLLECTORS → tags.is_protected のものは Skipped(keep_tag)(ルールにも料金にも渡さない)→
+    候補でない EC2・RDS・NAT だけ MetricsFetcher.fetch(None なら Skipped(metric_budget_exhausted))→
+    rules.evaluate → Finding に estimate_monthly の値を入れる。scan_id は now の %Y%m%dT%H%M%SZ、generated_at
+    は ISO 8601 の UTC で秒まで(末尾 Z)。regions_scanned は調べたリージョンの昇順。thresholds には使った Thresholds
+    の全フィールドを入れる。件数は切り詰めない。'
+  acceptance:
+  - moto で 6 種類それぞれに候補になるものとならないものを作ると、候補になるものだけが findings に入る
+  - Keep=true(値が 'True' のものも含む)のリソースは、6 種類とも findings に入らず skipped(keep_tag)に入る
+  - Aurora のインスタンスは skipped(aurora)、GWLB は skipped(unsupported_lb_type)になる
+  - max_metric_requests=1 で候補でない running の EC2 が 2 件あると、2 件目が metric_budget_exhausted
+    になり、GetMetricStatistics は 1 回だけ呼ばれ、metric_requests_used は 1
+  - CleanupCandidate=true と 7 日前の CleanupStoppedAt が付いた stopped の EC2 は Finding(Delete,
+    ec2-stopped-elapsed) になり、そのリソースにはメトリクスの API を呼ばない。6 日前なら stop_wait_pending
+  - scan_id と generated_at が FixedClock の時刻から作られる
+  depends_on:
+  - T-013
+  - T-014
+  - T-015
+  - T-017
+  - T-019
+  size: M
+  human_check: ''
+  status: todo
+- id: T-022
+  title: scan サブコマンド(cli.py)
+  milestone: M2
+  request: 'cli.py の scan サブコマンドを実装する(詳細設計 F-8)。オプション: --profile、--config、--region(複数回)、--output、--period-days、--ec2-cpu-max-percent、--ec2-network-bytes-max、--rds-connections-max、--nat-bytes-max、--stop-wait-days、--max-metric-requests。値は
+    load_config の overrides に渡す(--region は regions)。main のシグネチャを main(argv: Sequence[str]
+    | None = None, *, clock: Clock | None = None) -> int にし、テストで時刻を注入できるようにする。ClientFactory(''read'',
+    profile)。料金は use_price_list_api が true なら ChainedPriceLookup([PriceListLookup,
+    CachedPriceLookup, BundledPriceTable.load_default()])、false なら同梱だけ。結果は --output(標準は
+    out/scan-<scan_id>.json)に UTF-8 の JSON で書く。標準出力の要約は次の行: findings: <n> / by_action:
+    Delete=<n> Stop=<n> / skipped: <理由>=<n> …(理由の昇順)/ metric_requests_used: <n> /
+    discovery: <method> / 警告 1 件ごとに warning: <文>。全体を run_with_error_handling で包む。'
+  acceptance:
+  - moto 上で main(['scan', '--region', 'ap-northeast-1', '--output', <tmp>]) は 0 を返し、書いた
+    JSON は ScanResult.from_dict で読める
+  - --region を指定すると discovery.method は explicit_regions になり、resource-explorer-2:Search
+    を呼ばない
+  - --period-days 3 を付けると、出力の thresholds.period_days が 3 になる
+  - scan 全体で呼んだ操作名(フックで記録)は ALLOWED_OPERATIONS['read'] の部分集合で、cloudwatch:GetMetricData
+    と ce の操作は一度も呼ばない
+  - '標準出力に findings:、by_action:、metric_requests_used:、discovery: で始まる行がある'
+  - 範囲外の値(--period-days 0)では終了コード 2 になり、ファイルを書かない
+  depends_on:
+  - T-021
+  - T-020
+  - T-007
+  size: M
+  human_check: ''
+  status: todo
+- id: T-023
+  title: Cost Explorer の CSV の読み込み(costcsv.py)
+  milestone: M3
+  request: '詳細設計 データ 8 にもとづき、src/aws_cost_cleaner/costcsv.py を作る。CSV の形式(ヘッダー、期間の列、合計の列と行の見分け方)は
+    docs/verification-notes.md「Cost Explorer CSV の形式」と見本 tests/fixtures/cost_by_service.csv・cost_by_region.csv
+    に合わせ、合計の列と行の名前は定数 TOTAL_LABELS に置く。公開するもの: CsvKind = Literal[''region'',''service'']、frozen
+    dataclass CostCsv(path: Path, kind: CsvKind, totals: dict[str, Decimal])、read_cost_csv(path:
+    Path) -> CostCsv、combine(csvs: Sequence[CostCsv]) -> tuple[dict[str, Decimal],
+    dict[str, Decimal]](region_totals、service_totals の順)、SERVICE_MAP: dict[str, frozenset[ResourceType]](見本の列名から作る)、type_totals(service_totals:
+    Mapping[str, Decimal], service_map: Mapping[str, frozenset[ResourceType]] = SERVICE_MAP)
+    -> dict[ResourceType, Decimal]。種類の判定、空のファイルとヘッダーだけのファイル(kind=''service''、totals
+    は空、警告 1 行)、空のセル、エラーはデータ 8 のとおり。'
+  acceptance:
+  - 見本のサービス別 CSV は kind='service'、リージョン別 CSV は kind='region' になり、totals は合計の行を除いた期間の行の和になる
+  - 同じリージョン別 CSV を 2 回渡して combine すると、region_totals の各値は 2 倍になる
+  - 空のファイルとヘッダーだけのファイルは、エラーにならず totals が空になり、標準エラーに 1 行出る
+  - BOM つきのファイルが読め、空のセルは 0 として足される
+  - 数値にできないセルと、リージョンコードとサービス名が混ざった列は CostCsvError になる
+  - 'type_totals({''A'': 1, ''B'': 2, ''X'': 5}, {''A'': {ebs_volume, nat_gateway},
+    ''B'': {ebs_volume}}) は ebs_volume=3、nat_gateway=1 になり、X について標準エラーに 1 行出る'
+  depends_on:
+  - T-010
+  - T-003
+  - T-002
+  size: M
+  human_check: ''
+  status: todo
+- id: T-024
+  title: レポートの Markdown と承認 JSON の生成(report.py)
+  milestone: M3
+  request: '詳細設計 F-9 の出力を src/aws_cost_cleaner/report.py に作る(AWS もネットワークも使わない)。render_markdown(scan:
+    ScanResult, ordered: Sequence[Finding], csv_files: Sequence[CostCsv] = ()) ->
+    str と build_approval(scan: ScanResult, ordered: Sequence[Finding]) -> dict[str,
+    Any]。ordered は並べ終えた Finding(並べ方は T-025)。表は「## 新しい候補」と「## 停止後の削除の承認」の 2 つで、後者には
+    ec2-stopped-elapsed と rds-stopped-elapsed を入れ、表の上に F-9 の注記を置く。列、ID / 名前、金額、太字、エスケープは
+    F-9 のとおり。表の下に「## 料金について」「## Cost Explorer CSV」(CSV があるときだけ)「## スキップしたリソース」「##
+    発見の方法」の節を置く。承認 JSON はデータ 6 の形で、項目は新しい候補の表、停止後の表の順で Markdown と同じ順・同じ件数、すべて approved:
+    false。tests/fixtures/scan_sample.json(3 件)と、そこから作った tests/fixtures/expected_report.md
+    を置く。'
+  acceptance:
+  - 表のヘッダー行は | リージョン | サービス | リソースID / 名前 | 状態 / メトリクス | 推定月額コスト | 推奨アクション | 判断理由
+    | である
+  - 名前があれば vol-0123 / tmp-data、なければ ID だけ。金額は $8.00、null は 不明。アクションは **Delete** の形
+  - セルの中の | は \| に、改行は空白になる
+  - ec2-stopped-elapsed と rds-stopped-elapsed の Finding は「停止後の削除の承認」の表に入り、その表の上に最終スナップショットなしで削除される旨の注記がある
+  - 100 件の Finding を渡すと表の行が 100 行出て、承認 JSON の items も 100 件で、すべて approved が false
+  - tests/fixtures/scan_sample.json から作った Markdown が tests/fixtures/expected_report.md
+    と一致する
+  depends_on:
+  - T-003
+  - T-006
+  - T-023
+  size: M
+  human_check: expected_report.md を見て、表の読みやすさ、理由の文面、2 つの表の分け方と注記が削除の承認として誤解なく読めるかを確かめる。
+  status: todo
+- id: T-025
+  title: 並べ方と report サブコマンド
+  milestone: M3
+  request: 'report.py に sort_findings(findings: Sequence[Finding], region_totals:
+    Mapping[str, Decimal] | None, type_totals: Mapping[ResourceType, Decimal] | None)
+    -> list[Finding] を足し、cli.py の report サブコマンドを実装する(詳細設計 F-9)。両方 None なら、推定月額の降順(None
+    は最後)→ region → resource_id。どちらかがあれば、region_totals の降順 → type_totals の降順 → 同上。ないキーは
+    0、None の側はすべて 0 とみなす。CLI: report --scan PATH [--cost-csv PATH ...] [--output-dir
+    DIR(標準 out)]。scan の JSON を読み、CSV があれば read_cost_csv と combine し、リージョン別の CSV がなければ
+    region_totals を None、サービス別がなければ type_totals を None にする。sort_findings → render_markdown
+    と build_approval → report-<scan_id>.md と approval-<scan_id>.json(UTF-8、indent
+    2)を書く。boto3 のクライアントを作らない。run_with_error_handling で包む。'
+  acceptance:
+  - CSV なしでは、推定月額の降順(None は最後)→ region → resource_id の順になる
+  - region_totals と type_totals を両方渡すと、F-9 の (1)〜(5) の順になる(同じリージョンの中では type_totals
+    の大きい種類が先)
+  - region_totals だけを渡すと、種類は並べ方に効かず、同じリージョンの中は推定月額の降順になる
+  - main(['report', '--scan', <見本>, '--output-dir', <tmp>]) は 0 を返し、report-<scan_id>.md
+    と approval-<scan_id>.json を書き、items の件数は Markdown の表の行数の合計と等しい
+  - report の実行中に boto3.session.Session が作られない(パッチして確かめる)
+  - 数値にできないセルを含む CSV を --cost-csv に渡すと終了コード 2 になる
+  depends_on:
+  - T-024
+  - T-022
+  size: M
+  human_check: ''
+  status: todo
+- id: T-026
+  title: 承認ファイルの読み込みと検証(approval.py)
+  milestone: M4
+  request: '詳細設計 データ 6 にもとづき、src/aws_cost_cleaner/approval.py を作る。frozen dataclass
+    ApprovalFile(schema_version: int, scan_id: str, account_id: str, items: tuple[ApprovalItem,
+    ...])。load_approval(path: Path) -> ApprovalFile は、JSON として読めない、必須キーがない、データ 6 の
+    5 つの検証(schema_version == 1、approved が bool、catalog.is_allowed、region と resource_id
+    が空でなく load_balancer と rds_instance は arn も空でない、(region, resource_id) の重複がない)に違反する場合に
+    ApprovalFileError を出す。verify_account(approval: ApprovalFile, factory: ClientFactory)
+    -> None は sts:GetCallerIdentity の Account と account_id を比べ、違えば AccountMismatchError。select(approval:
+    ApprovalFile, action: Action) -> list[ApprovalItem] は approved が True で recommended_action
+    が action の項目を、ファイルの順で返す。'
+  acceptance:
+  - 正しい承認ファイルを読むと、items が ApprovalItem のタプルになる
+  - approved が文字列 'true' の項目があると ApprovalFileError
+  - (region, resource_id) の重複、または未知の resource_type があると ApprovalFileError
+  - ec2_instance + Delete + ec2-low-cpu の項目があると ApprovalFileError
+  - load_balancer または rds_instance で arn が空だと ApprovalFileError
+  - moto の sts のアカウントと違う account_id では、verify_account が AccountMismatchError を出す
+  depends_on:
+  - T-006
+  - T-011
+  size: M
+  human_check: ''
+  status: todo
+- id: T-027
+  title: 承認項目の取り直し(lookup.py)
+  milestone: M4
+  request: '詳細設計 F-11 の「対象の取り直し」を src/aws_cost_cleaner/lookup.py に作る。fetch(factory:
+    ClientFactory, item: ApprovalItem) -> Resource。Resource Explorer は使わない。item.region
+    のクライアントで、F-11 の表の Describe 系 API を ID 1 件ずつ呼び(ELB は arn で引き、DescribeTags とターゲット数も取る)、コレクタの
+    to_resource で Resource にする。EIP の attrs には AssociationId(なければ None)を入れる。stopped
+    の EC2 や RDS もそのまま返す。見つからないとき(定数 NOT_FOUND_CODES = InvalidVolume.NotFound、InvalidAllocationID.NotFound、NatGatewayNotFound、LoadBalancerNotFound、InvalidInstanceID.NotFound、DBInstanceNotFound
+    の ClientError、または結果が空、NAT が deleted、EC2 が terminated)は StateMismatchError を出す。ほかの
+    ClientError は AwsOperationError(aws_error_code=Error.Code)を出す。'
+  acceptance:
+  - moto で作った 6 種類のリソースそれぞれについて、fetch は resource_id と state が正しい Resource を返す
+  - 存在しない ID を持つ項目(6 種類それぞれ)では StateMismatchError になる
+  - terminated の EC2 では StateMismatchError になる
+  - Stubber で NOT_FOUND_CODES にないコードの ClientError を返すと、AwsOperationError になり aws_error_code
+    にそのコードが入る
+  - 関連付けた EIP の attrs['AssociationId'] は None でない
+  - fetch は Describe 系の操作だけを呼び、resource-explorer-2:Search を呼ばない
+  depends_on:
+  - T-017
+  - T-026
+  size: M
+  human_check: ''
+  status: todo
+- id: T-028
+  title: tag サブコマンド(tagging.py)
+  milestone: M4
+  request: '詳細設計 F-10 を src/aws_cost_cleaner/tagging.py と cli.py の tag サブコマンドに作る。run_tag(approval:
+    ApprovalFile, factory: ClientFactory, thresholds: Thresholds, clock: Clock, apply:
+    bool) -> list[Outcome](action=''tag'')。approved が True の項目ごとに lookup.fetch で取り直し、F-10
+    の確認の表のとおり failed(Outcome.error に例外)か skipped にする。メトリクスは取らない。確認を通ったものに、F-10 のとおり
+    CleanupCandidate=true と CleanupReason=<reason_code> を付ける(API も F-10 のとおり。EC2/RDS
+    の Delete の項目は CleanupReason だけ)。apply が False なら planned だけを返し、タグ付けの API を呼ばない。1
+    件の失敗で止めない。ClientError は AwsOperationError。CLI: tag --approval PATH [--profile
+    P] [--config F] [--apply]。load_approval → verify_account → run_tag(ClientFactory(''tag'',
+    profile))→ render_outcomes を標準出力 → exit_code_for_outcomes。run_with_error_handling
+    で包む。'
+  acceptance:
+  - --apply なしでは終了コード 0 で、moto の状態でタグが増えていない
+  - '--apply では approved: true の項目だけに CleanupCandidate=true と CleanupReason が付き、approved:
+    false の項目は変わらない'
+  - Keep=true の項目は ProtectedResourceError、in-use の EBS と stopped になった Stop の項目の EC2
+    は StateMismatchError で failed になり、タグは付かず、終了コードは 1
+  - すでに CleanupCandidate=true の Stop の項目は skipped になる
+  - 候補済みで停止から 7 日たった EC2 の Delete の項目(ec2-stopped-elapsed)では、CleanupReason が ec2-stopped-elapsed
+    に書き換わる
+  - tag の実行中に cloudwatch:GetMetricStatistics と resource-explorer-2:Search を呼ばない
+  depends_on:
+  - T-027
+  - T-004
+  - T-022
+  size: M
+  human_check: ''
+  status: todo
+- id: T-029
+  title: stop サブコマンド(actions.py)
+  milestone: M4
+  request: '詳細設計 F-11 を src/aws_cost_cleaner/actions.py の run_stop と cli.py の stop
+    サブコマンドに作る。run_stop(approval: ApprovalFile, factory: ClientFactory, clock: Clock,
+    apply: bool) -> tuple[list[Outcome], int]。対象は approval.select(approval, ''Stop'')、int
+    は recommended_action が Stop でない項目の件数。各項目を lookup.fetch で取り直し、Keep → ProtectedResourceError、is_candidate
+    でない → NotCandidateError、あとは F-11 の状態ごとの振る舞いの表のとおり。停止は EC2 が StopInstances(InstanceIds=[id])、RDS
+    が StopDBInstance(DBInstanceIdentifier=id)(DBSnapshotIdentifier は渡さない)。続けて CleanupStoppedAt=tags.format_stopped_at(clock.now())
+    を EC2 は CreateTags、RDS は AddTagsToResource(ResourceName=arn) で付ける。Outcome は停止を
+    action=''stop''、タグを action=''tag_stopped_at'' として別の行にする。apply が False なら planned。CLI:
+    stop --approval PATH [--profile P] [--apply]。ClientFactory(''execute'', profile)、要約の前に「Stop
+    以外の項目 N 件は対象外」と出す。'
+  acceptance:
+  - --apply で、候補の running の EC2 と available の RDS が停止し、CleanupStoppedAt が FixedClock
+    の時刻で付く
+  - 'approved: false の項目、CleanupCandidate のない項目(NotCandidateError)、Delete の項目は状態が変わらない'
+  - CleanupStoppedAt があって running の EC2 は停止されず、StateMismatchError で failed になり、終了コードは
+    1
+  - stopped で CleanupStoppedAt がない候補の EC2 には、タグだけが付く(action='tag_stopped_at'、status='done')
+  - --apply なしでは状態もタグも変わらず、終了コードは 0
+  - StopDBInstance の引数に DBSnapshotIdentifier がなく、resource-explorer-2:Search を呼ばない
+  depends_on:
+  - T-028
+  size: M
+  human_check: ''
+  status: todo
+- id: T-030
+  title: delete サブコマンド(actions.py)
+  milestone: M4
+  request: '詳細設計 F-12 を actions.py の run_delete と cli.py の delete サブコマンドに作る。run_delete(approval:
+    ApprovalFile, factory: ClientFactory, thresholds: Thresholds, clock: Clock, apply:
+    bool) -> tuple[list[Outcome], int](action=''delete'')。対象は approval.select(approval,
+    ''Delete'')。lookup.fetch、Keep、CleanupCandidate の確認は run_stop と同じ。種類ごとの前提条件と API
+    は F-12 の表のとおりで、EC2・RDS の待ち期間は tags.parse_stopped_at と rules.has_elapsed(thresholds.stop_wait_days)で確かめる。RDS
+    は DeleteDBInstance(DBInstanceIdentifier=id, SkipFinalSnapshot=True)で、DeleteAutomatedBackups
+    は渡さない。available の RDS の note は「停止後に起動している(自動起動の可能性)」。削除の ClientError は AwsOperationError(aws_error_code)で
+    failed にして次に進む。apply が False なら planned で、出力の最後に「RDS は最終スナップショットなしで削除される」と出す。CLI:
+    delete --approval PATH [--profile P] [--config F] [--stop-wait-days N] [--apply]、ClientFactory(''execute'',
+    profile)。'
+  acceptance:
+  - --apply で、候補の EBS、EIP、NAT、ELB が消える(NAT は deleted になる)
+  - '最初の承認ファイル(EC2 が Stop / ec2-low-cpu、approved: true)を渡しても EC2 は終了しない'
+  - Delete / ec2-stopped-elapsed の承認ファイルで、CleanupStoppedAt から 7 日たった EC2 は terminated
+    になり、6 日 23 時間 59 分 59 秒なら WaitPeriodNotElapsedError で残る
+  - RDS の削除は SkipFinalSnapshot=True で呼ばれ、DeleteAutomatedBackups を渡さない
+  - Stubber で削除の API に ClientError を返させると、その項目は failed で aws_error_code が入り、ほかの項目は処理され、終了コードは
+    1
+  - --apply なしでは状態が変わらず、出力の最後に最終スナップショットの注意が出る
+  depends_on:
+  - T-029
+  - T-012
+  size: M
+  human_check: ''
+  status: todo
+- id: T-031
+  title: ワークフロー全体の安全テスト(テストだけ)
+  milestone: M4
+  request: テストだけを足す(src/ は変えない)。tests/acceptance/test_workflow_safety.py に、詳細設計「受け入れテスト」15
+    と 17 と、2 段階の削除の流れを書く。moto 上で cli.main を FixedClock で呼び、scan --region → report
+    → 承認ファイルの approved を true に書き換える → tag --apply → stop --apply → 時刻を 7 日進めて scan
+    --region → report → approved を書き換える → tag --apply → delete --apply を通す。各コマンドの間、呼ばれた操作名を
+    botocore のイベントフックで記録する。
+  acceptance:
+  - tag、stop、delete の実行中に resource-explorer-2:Search が 0 回
+  - どのコマンドでも CreateSnapshot、CreateDBSnapshot、Run で始まる操作、Start で始まる操作、CreateTags 以外の
+    Create で始まる操作を呼ばない
+  - 一連の流れの最後に、低稼働だった EC2 が terminated になる
+  - 1 回目の承認ファイルを delete --apply に渡しても、EC2 は terminated にならない
+  - scan と report の実行中に呼んだ操作は ALLOWED_OPERATIONS['read'] の部分集合である
+  depends_on:
+  - T-025
+  - T-030
+  size: M
+  human_check: ''
+  status: todo
+- id: T-032
+  title: IAM テンプレートの骨組みと cfn-lint(infra/iam-roles.yaml)
+  milestone: M5
+  request: '詳細設計 F-13 にもとづき、infra/iam-roles.yaml の骨組みを作り、.github/workflows/ci.yml
+    に uv run cfn-lint infra/iam-roles.yaml の手順を足す。組み込み関数は長い形式(Ref、Fn::Sub)だけを使い、短縮形(!Ref
+    など)は使わない。パラメータ: AgentTrustedPrincipalArns と ExecutorTrustedPrincipalArns(CommaDelimitedList)、RoleNamePrefix(String、標準値
+    aws-cost-cleaner)。リソース: AgentRole と ExecutorRole(AWS::IAM::Role)。RoleName は Fn::Sub
+    で ${RoleNamePrefix}-agent と ${RoleNamePrefix}-executor。信頼ポリシーの Principal.AWS は、それぞれのパラメータの
+    Ref だけ。ManagedPolicyArns は arn:aws:iam::aws:policy/ReadOnlyAccess。インラインポリシーは各ロールに
+    1 つ(PolicyName は AgentPolicy と ExecutorPolicy)で、ステートメントは T-033・T-034 で入れる(cfn-lint
+    を通すため、ここでは仮のステートメントを置いてよい)。tests/infra/test_iam_roles.py で yaml.safe_load して確かめる。'
+  acceptance:
+  - uv run cfn-lint infra/iam-roles.yaml が終了コード 0 で、ci.yml にその手順がある
+  - yaml.safe_load でテンプレートが読める
+  - 3 つのパラメータの Type と、RoleNamePrefix の Default が request のとおり
+  - AgentRole と ExecutorRole の RoleName は Fn::Sub、信頼ポリシーの Principal.AWS はそれぞれ対応するパラメータの
+    Ref
+  - 両方のロールの ManagedPolicyArns が [arn:aws:iam::aws:policy/ReadOnlyAccess]
+  depends_on:
+  - T-001
+  size: S
+  human_check: ''
+  status: todo
+- id: T-033
+  title: 'IAM: 両方のロールに共通のステートメント'
+  milestone: M5
+  request: 'infra/iam-roles.yaml の AgentPolicy と ExecutorPolicy の両方に、次の 3 つの Sid を入れる(Resource
+    はすべて *。T-032 の仮のステートメントは消す)。DenyPaidAndHighVolumeReadAPIs: Deny。Action は ce:*、cur:*、cloudwatch:GetMetricData、cloudwatch:GetMetricWidgetImage、logs:StartQuery、logs:FilterLogEvents、logs:GetLogEvents、s3:GetObject、s3:ListBucket、athena:StartQueryExecution。AllowSingleMetricCheckWithinFreeTier:
+    Allow。Action は cloudwatch:GetMetricStatistics と pricing:GetProducts。ProtectCriticalResources:
+    Deny。Action は ec2:StopInstances、ec2:TerminateInstances、ec2:DeleteVolume、ec2:ReleaseAddress、ec2:DeleteNatGateway、rds:StopDBInstance、rds:DeleteDBInstance、elasticloadbalancing:DeleteLoadBalancer、ec2:CreateTags、ec2:DeleteTags、rds:AddTagsToResource、rds:RemoveTagsFromResource、elasticloadbalancing:AddTags、elasticloadbalancing:RemoveTags。Condition
+    は StringEquals の aws:ResourceTag/Keep = true。tests/infra/ にテストを足す。'
+  acceptance:
+  - 両方のポリシーに Sid が DenyPaidAndHighVolumeReadAPIs、AllowSingleMetricCheckWithinFreeTier、ProtectCriticalResources
+    のステートメントがある
+  - DenyPaidAndHighVolumeReadAPIs の Action の集合が request の 10 個と一致し、Effect は Deny
+  - ProtectCriticalResources の Action の集合が request の 14 個と一致し、Condition が StringEquals
+    aws:ResourceTag/Keep = true
+  - AllowSingleMetricCheckWithinFreeTier の Action の集合が {cloudwatch:GetMetricStatistics,
+    pricing:GetProducts}
+  - uv run cfn-lint infra/iam-roles.yaml が終了コード 0
+  depends_on:
+  - T-032
+  size: S
+  human_check: ''
+  status: todo
+- id: T-034
+  title: 'IAM: ロールごとのタグ付けと停止・削除の許可'
+  milestone: M5
+  request: 'infra/iam-roles.yaml に、詳細設計 F-13 のロールごとのステートメントを足す(Resource はすべて *)。AgentPolicy
+    に AllowTaggingForCleanupCandidate: Allow、ec2:CreateTags、rds:AddTagsToResource、elasticloadbalancing:AddTags、Condition
+    は ForAllValues:StringEquals の aws:TagKeys = [CleanupCandidate, CleanupReason]。ExecutorPolicy
+    に AllowStopAndDeleteOnlyWithCandidateTag: Allow、ec2:StopInstances、ec2:TerminateInstances、ec2:DeleteVolume、ec2:ReleaseAddress、ec2:DeleteNatGateway、rds:StopDBInstance、rds:DeleteDBInstance、elasticloadbalancing:DeleteLoadBalancer、Condition
+    は StringEquals の aws:ResourceTag/CleanupCandidate = true。ExecutorPolicy に AllowTaggingStoppedAt:
+    Allow、ec2:CreateTags と rds:AddTagsToResource、Condition は ForAllValues:StringEquals
+    の aws:TagKeys = [CleanupStoppedAt] と StringEquals の aws:ResourceTag/CleanupCandidate
+    = true。tests/infra/ に「IAM の静的テスト」の内容を足す。'
+  acceptance:
+  - AgentRole のどの Allow の Action にも Stop*、Terminate*、Delete*、Release*、Run*、Start*
+    と、ec2:CreateTags 以外の Create* がない
+  - テンプレートのどこにも ec2:DeleteSnapshot がない
+  - ExecutorRole の停止・削除の Allow には、すべて aws:ResourceTag/CleanupCandidate = true の条件がある
+  - タグ付けの Allow の aws:TagKeys が、AgentRole では {CleanupCandidate, CleanupReason}、ExecutorRole
+    では {CleanupStoppedAt} と完全に一致する
+  - uv run cfn-lint infra/iam-roles.yaml が終了コード 0
+  depends_on:
+  - T-033
+  size: S
+  human_check: 検証用の AWS アカウントにデプロイし、IAM ポリシーシミュレータか実際の操作で、AgentRole では停止・削除が拒否され、Keep
+    のリソースにタグを付けられず、CleanupStoppedAt を付けられないこと、ExecutorRole では候補タグのないリソースを削除できないことを確かめる。
+  status: todo
+- id: T-035
+  title: 料金表の更新スクリプト(scripts/update_prices.py)
+  milestone: M5
+  request: '詳細設計 F-15 とデータ 7 にもとづき、scripts/update_prices.py を作る(CLI のサブコマンドにはしない)。build_table(lookup:
+    PriceLookup, today: date) -> dict[str, Any] は、4 リージョン(ap-northeast-1、ap-northeast-3、us-east-1、us-west-2)×
+    データ 7 の 11 個のキーについて lookup.get で料金を集め、データ 7 のスキーマの dict を返す。EC2 の型は定数 EC2_TYPES
+    = t3.micro、t3.small、t3.medium、t3.large、m5.large、m6i.large。RDS は mysql と postgres
+    × single-az と multi-az × db.t3.micro、db.t3.small、db.t3.medium、db.m5.large。入れ子のキーで取れなかった値は書かない。入れ子でないキー(public_ipv4_hour
+    など)が取れなければ PriceUnavailableError を出す。checked_at は today。main(argv) は --profile
+    と --output(標準はパッケージの prices.json)を受け、PriceListLookup で build_table して書き出す。'
+  acceptance:
+  - すべての値を返す偽の PriceLookup で build_table を呼ぶと、結果は T-018 のスキーマの検査を通る
+  - 結果の regions のキーは 4 リージョンちょうどである
+  - checked_at は渡した today の YYYY-MM-DD になる
+  - public_ipv4_hour だけ None を返す偽の PriceLookup では PriceUnavailableError になる
+  - ec2_linux_hour の一部の型だけ None を返すと、その型のキーだけが結果にない
+  depends_on:
+  - T-020
+  size: S
+  human_check: 開発者が実際の認証情報でスクリプトを実行し、prices.json の差分を確かめてコミットする。
+  status: todo
+- id: T-036
+  title: 事前準備の手順(docs/setup.md)
+  milestone: M5
+  request: 詳細設計 F-14 にもとづき、docs/setup.md を書く。節は「## Resource Explorer のセットアップ」(クイックセットアップでアグリゲーターインデックスを
+    ap-northeast-1 に作る手順)、「## Keep タグ」(守るリソースに Keep=true を付ける。値は小文字の true にする理由)、「##
+    IAM ロールのデプロイ」(aws cloudformation deploy --template-file infra/iam-roles.yaml --stack-name
+    aws-cost-cleaner-iam --capabilities CAPABILITY_NAMED_IAM --parameter-overrides
+    で 3 つのパラメータを渡す例)、「## プロファイルの設定」(~/.aws/config に AI 用と実行用の 2 つのプロファイルを role_arn
+    で書く例)。
+  acceptance:
+  - docs/setup.md に、request の 4 つの見出しがこの順である
+  - aws cloudformation deploy、--template-file infra/iam-roles.yaml、--capabilities
+    CAPABILITY_NAMED_IAM を含むコマンド例がある
+  - AgentTrustedPrincipalArns、ExecutorTrustedPrincipalArns、RoleNamePrefix の 3 つのパラメータ名が出てくる
+  - プロファイルの例に、-agent と -executor で終わる role_arn が 1 つずつある
+  depends_on:
+  - T-034
+  size: S
+  human_check: 検証用の AWS アカウントで、この手順のとおりにデプロイできることを確かめる。
+  status: todo
+- id: T-037
+  title: AI エージェント用のプロンプト(docs/agent-prompt.md)
+  milestone: M5
+  request: '詳細設計 F-14 の要点にもとづき、docs/agent-prompt.md に AI エージェント用のシステムプロンプトのテンプレートを書く。内容:
+    使ってよいのは AI 用のプロファイルでの aws-cost-cleaner scan / report / tag だけで、aws CLI を直接呼ばない。承認ファイルの
+    approved を書き換えない。tag はまず dry-run の結果を見せ、人間に指示されてから --apply を付ける。stop と delete
+    は実行しない。調査の手順(CSV があれば受け取る → scan → report → 表を見せて指示を待つ)。停止から stop_wait_days 日たった後に頼まれたら「停止後の削除の承認」の表を見せる。プロファイル名は
+    <AGENT_PROFILE> のプレースホルダにする。'
+  acceptance:
+  - docs/agent-prompt.md に aws-cost-cleaner scan、aws-cost-cleaner report、aws-cost-cleaner
+    tag の 3 つのコマンド例がある
+  - stop と delete を実行しないこと、aws CLI を直接呼ばないことが書いてある
+  - approved を書き換えないことが書いてある
+  - --apply は人間の指示の後に付けることが書いてある
+  - <AGENT_PROFILE> のプレースホルダと、「停止後の削除の承認」という語がある
+  depends_on:
+  - T-030
+  size: S
+  human_check: このプロンプトを Claude Code に読ませ、aws CLI を直接呼ばないこと、承認の前に tag --apply を実行しないこと、stop
+    / delete を実行しないことを確かめる。
+  status: todo
+- id: T-038
+  title: README の拡充
+  milestone: M5
+  request: '詳細設計 F-14 と「既存のコードからの移行」にもとづき、README.md を書き足す。1 行目のタイトル「# aws-cost-cleaner」と、説明文「AWSリソース棚卸し・コスト最適化AIエージェント」はそのまま残す。足す節:
+    「## 使い方」(uv sync と 5 つのサブコマンドの例)、「## ワークフロー」(詳細設計「目的と範囲」のワークフローの表 7 段。誰が、どのロールで、どのコマンドを実行するか)、「##
+    安全設計」(No-Create、Keep=true の保護、人間の承認、2 段階の削除、Zero-API-Cost を IAM とコードの両方で守ることの要約)、「##
+    ドキュメント」(docs/setup.md と docs/agent-prompt.md へのリンク)。'
+  acceptance:
+  - 'README.md の 1 行目は # aws-cost-cleaner で、説明文「AWSリソース棚卸し・コスト最適化AIエージェント」が残っている'
+  - 「## 使い方」「## ワークフロー」「## 安全設計」「## ドキュメント」の見出しがある
+  - ワークフローの表に段 1〜7 の 7 行がある
+  - scan、report、tag、stop、delete の 5 つのサブコマンドの例がある
+  - docs/setup.md と docs/agent-prompt.md へのリンクがある
+  depends_on:
+  - T-036
+  - T-037
+  size: S
+  human_check: ''
+  status: todo
