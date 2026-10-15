@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from aws_cost_cleaner.errors import AwsCostCleanerError
+from aws_cost_cleaner.errors import (
+    EXIT_OK,
+    EXIT_PARTIAL_FAILURE,
+    AwsCostCleanerError,
+)
 
 ResourceType = Literal[
     "ebs_volume",
@@ -256,3 +260,41 @@ class Outcome:
     error: AwsCostCleanerError | None
     aws_error_code: str | None
     note: str | None
+
+
+_OUTCOME_STATUSES: tuple[str, ...] = ("planned", "done", "skipped", "failed")
+
+
+def render_outcomes(outcomes: Sequence[Outcome]) -> str:
+    """Render outcomes as tab-separated lines followed by a status summary line."""
+    lines: list[str] = []
+    for o in outcomes:
+        error_field = "-" if o.error is None else type(o.error).__name__
+        aws_code_field = "-" if o.aws_error_code is None else o.aws_error_code
+        note_field = "-" if o.note is None else o.note
+        row = "\t".join(
+            [
+                o.status,
+                o.action,
+                o.resource_type,
+                o.region,
+                o.resource_id,
+                error_field,
+                aws_code_field,
+                note_field,
+            ]
+        )
+        lines.append(row)
+
+    summary = " ".join(
+        f"{s}={sum(1 for o in outcomes if o.status == s)}" for s in _OUTCOME_STATUSES
+    )
+    lines.append(summary)
+    return "\n".join(lines)
+
+
+def exit_code_for_outcomes(outcomes: Sequence[Outcome]) -> int:
+    """Return exit code 1 if any outcome failed, otherwise 0."""
+    if any(o.status == "failed" for o in outcomes):
+        return EXIT_PARTIAL_FAILURE
+    return EXIT_OK
