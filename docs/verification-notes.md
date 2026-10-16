@@ -20,3 +20,21 @@
 | 12 | `CleanupReason` などのタグ値に使える文字(EC2、RDS、ELB) | 3 サービスに共通して使えるのは、Unicode の文字、数字、空白と `+ - = . _ : / @`。EC2: キーは 128 文字まで、値は 256 文字まで(EC2 自体は任意の文字を許すが、他のサービスに合わせるとこの範囲)。RDS: キーは 1〜128 文字、値は 1〜256 文字で、使える文字は文字、数字、空白と `_ . : / = + - @`。キーと値は `aws:` と `rds:` で始められない。ELB(ELBv2): キーは 1〜128 文字、値は 0〜256 文字で、使える文字は RDS と同じ集合 | https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Tags.html<br>https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Tagging.html<br>https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_Tag.html | 2026-10-17 |
 | 13 | Resource Explorer の resourcetype 名(F-4 の表) | 一覧に実在する: `ec2:volume`、`ec2:elastic-ip`、`ec2:natgateway`、`ec2:instance`、`rds:db`、`elasticloadbalancing:loadbalancer/app`、`elasticloadbalancing:loadbalancer/net`。ELB には `elasticloadbalancing:loadbalancer` もある。`elasticloadbalancingv2:loadbalancer` は `elasticloadbalancing:loadbalancer` として報告される。`rds:dbinstance` は `rds:db` として報告される。`ListSupportedResourceTypes` での確認は行っていない | https://docs.aws.amazon.com/resource-explorer/latest/userguide/supported-resource-types.html | 2026-10-17 |
 | 14 | ID を指定した Describe 系 API で、リソースが見つからないときのエラーコード(F-11 の表)と、削除保護のときのエラーコード(F-12) | 見つからないとき: EC2 のエラーコード一覧に `InvalidVolume.NotFound`、`InvalidAllocationID.NotFound`、`InvalidInstanceID.NotFound`、`NatGatewayNotFound` がある(`InvalidNatGatewayID.NotFound` もあり、`DescribeNatGateways` がどちらを返すかは未確認)。ELBv2 の `DescribeLoadBalancers` は `LoadBalancerNotFound`。RDS の `DescribeDBInstances` は `DBInstanceNotFound`(HTTP 404)。削除保護のとき: EC2 の `OperationNotPermitted` は、終了保護のあるインスタンスを終了しようとした場合などの例が説明に書かれている。ELBv2 の `DeleteLoadBalancer` は削除保護中は削除できないと書かれ、エラーに `OperationNotPermitted` があるが、削除保護との対応を名指しした記述はない(未確認)。ELBv2 の `DeleteLoadBalancer` は、存在しないか削除済みのロードバランサーでも成功する。RDS の `DeleteDBInstance` のエラー一覧に `InvalidParameterCombination` はなく、削除保護のときのコードは未確認 | https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html<br>https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_DescribeLoadBalancers.html<br>https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_DeleteLoadBalancer.html<br>https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DescribeDBInstances.html<br>https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DeleteDBInstance.html | 2026-10-17 |
+## ライブラリの確認
+
+uv.lock の moto で実際に呼んで確かめた結果(確認日 2026-10-17、リージョン us-east-1、`mock_aws`)。未対応のものはテストで Stubber を使う。
+
+| 対象 | moto の版 | 結果 | テストでの扱い |
+| --- | --- | --- | --- |
+| resource-explorer-2 の Search | 5.2.4 | 未対応: 索引の作成・ビューの作成・検索がすべて 404 Not yet implemented になる | Stubber |
+| pricing の GetProducts | 5.2.4 | 未対応: 呼び出すと 404 Not yet implemented になる | Stubber |
+| rds の stop_db_instance | 5.2.4 | 対応: 停止後の DBInstanceStatus が stopped になる | moto |
+| elbv2 の describe_target_health | 5.2.4 | 対応: 未登録で 0 件、1 件登録後に 1 件(State は healthy)が返る | moto |
+| cloudwatch の get_metric_statistics | 5.2.4 | 対応: データを入れた次元で Datapoints(Average、Maximum)が返り、データのない次元では空になる | moto |
+| elbv2 の create_load_balancer(Type=gateway) | 5.2.4 | 対応: 作成でき、取得した Type が gateway になる | moto |
+| 存在しない ID: DescribeVolumes | 5.2.4 | 対応: `InvalidVolume.NotFound` | moto |
+| 存在しない ID: DescribeAddresses | 5.2.4 | 対応: `InvalidAllocationID.NotFound` | moto |
+| 存在しない ID: DescribeNatGateways | 5.2.4 | 未対応: エラーにならない(空の一覧を返す) | Stubber |
+| 存在しない ID: DescribeLoadBalancers | 5.2.4 | 対応: `LoadBalancerNotFound` | moto |
+| 存在しない ID: DescribeInstances | 5.2.4 | 対応: `InvalidInstanceID.NotFound` | moto |
+| 存在しない ID: DescribeDBInstances | 5.2.4 | 対応: `DBInstanceNotFound` | moto |
