@@ -1,0 +1,17 @@
+{
+  "ViewArn": "arn:aws:resource-explorer-2:ap-northeast-1:123456789012:view/all/11111111-2222-3333-4444-555555555555",
+  "Count": {
+    "Complete": false,
+    "TotalResources": 100
+  },
+  "NextToken": "tok-x",
+  "Resources": [
+    {
+      "Arn": "arn:aws:ec2:ap-northeast-1:123456789012:volume/vol-inc",
+      "OwningAccountId": "123456789012",
+      "Region": "ap-northeast-1",
+      "ResourceType": "ec2:volume",
+      "Service": "ec2"
+    }
+  ]
+}
