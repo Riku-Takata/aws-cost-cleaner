@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from aws_cost_cleaner import catalog
+from aws_cost_cleaner import catalog, tags
 from aws_cost_cleaner.config import Thresholds
 from aws_cost_cleaner.models import Action, Finding, Resource, Skipped, SkipReason
 
@@ -228,6 +228,76 @@ def _evaluate_rds(
     )
 
 
+def _stopped_elapsed_texts(stopped_at: datetime, now: datetime) -> tuple[str, str]:
+    """停止日の文字列と、経過日数入りの reason_text を返す。"""
+    date_str = stopped_at.astimezone(UTC).strftime("%Y-%m-%d")
+    days = (now - stopped_at).days
+    return (
+        date_str,
+        f"候補として {date_str} に停止し、{days} 日経過。削除の承認を求める",
+    )
+
+
+def _evaluate_candidate_ec2(
+    resource: Resource,
+    metrics: Mapping[str, float | None],
+    thresholds: Thresholds,
+    now: datetime,
+) -> Finding | Skipped:
+    """候補済みの EC2 インスタンスのクリーンアップ要否を判定する。"""
+    if resource.state == "running":
+        if tags.CLEANUP_STOPPED_AT in resource.tags:
+            return _skip(resource, "restarted_after_stop")
+        return _skip(resource, "already_candidate")
+    if resource.state == "stopped":
+        stopped_at = tags.parse_stopped_at(resource.tags.get(tags.CLEANUP_STOPPED_AT))
+        if stopped_at is None:
+            return _skip(resource, "stop_not_recorded")
+        if not has_elapsed(now, stopped_at, thresholds.stop_wait_days):
+            return _skip(resource, "stop_wait_pending")
+        date_str, reason_text = _stopped_elapsed_texts(stopped_at, now)
+        return _finding(
+            resource=resource,
+            metrics=metrics,
+            action="Delete",
+            reason_code="ec2-stopped-elapsed",
+            state_summary=f"stopped ({date_str} から停止)",
+            reason_text=reason_text,
+        )
+    return _skip(resource, "already_candidate")
+
+
+def _evaluate_candidate_rds(
+    resource: Resource,
+    metrics: Mapping[str, float | None],
+    thresholds: Thresholds,
+    now: datetime,
+) -> Finding | Skipped:
+    """候補済みの RDS インスタンスのクリーンアップ要否を判定する。"""
+    if resource.state not in ("stopped", "available"):
+        return _skip(resource, "already_candidate")
+    stopped_at = tags.parse_stopped_at(resource.tags.get(tags.CLEANUP_STOPPED_AT))
+    if stopped_at is None:
+        if resource.state == "stopped":
+            return _skip(resource, "stop_not_recorded")
+        return _skip(resource, "already_candidate")
+    if not has_elapsed(now, stopped_at, thresholds.stop_wait_days):
+        return _skip(resource, "stop_wait_pending")
+    date_str, reason_text = _stopped_elapsed_texts(stopped_at, now)
+    if resource.state == "stopped":
+        state_summary = f"stopped ({date_str} から停止)"
+    else:
+        state_summary = f"available ({date_str} に停止後に起動(自動起動の可能性))"
+    return _finding(
+        resource=resource,
+        metrics=metrics,
+        action="Delete",
+        reason_code="rds-stopped-elapsed",
+        state_summary=state_summary,
+        reason_text=reason_text,
+    )
+
+
 def evaluate(
     resource: Resource,
     metrics: Mapping[str, float | None],
@@ -235,6 +305,19 @@ def evaluate(
     now: datetime,
 ) -> Finding | Skipped:
     """リソースの状態とメトリクスからクリーンアップ候補またはスキップ理由を判定する。"""
+    if tags.is_candidate(resource.tags):
+        if resource.resource_type == "ec2_instance":
+            return _evaluate_candidate_ec2(resource, metrics, thresholds, now)
+        if resource.resource_type == "rds_instance":
+            return _evaluate_candidate_rds(resource, metrics, thresholds, now)
+        if resource.resource_type in (
+            "ebs_volume",
+            "elastic_ip",
+            "nat_gateway",
+            "load_balancer",
+        ):
+            return _skip(resource, "already_candidate")
+
     if resource.resource_type == "ebs_volume":
         return _evaluate_ebs(resource, metrics, thresholds, now)
     if resource.resource_type == "elastic_ip":
