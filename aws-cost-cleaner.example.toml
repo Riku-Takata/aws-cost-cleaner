@@ -1,0 +1,20 @@
+# 設定ファイルの例。--config で渡す
+
+[scan]
+resource_explorer_region = "ap-northeast-1"  # アグリゲーターインデックスがあるリージョン
+regions = []                                  # 空なら Resource Explorer で絞る。指定すると Resource Explorer を使わず、そのリージョンだけを調べる。--region で上書きできる
+max_metric_requests = 1000                    # 1 回の scan で呼ぶ GetMetricStatistics の上限
+
+[thresholds]
+period_days = 7
+ec2_cpu_max_percent = 5.0          # 期間内の最大 CPU 使用率がこの値「未満」なら低稼働
+ec2_network_bytes_max = -1         # NetworkIn+Out の期間合計がこの値「以下」なら低稼働。-1 は判定に使わない
+rds_connections_max = 0            # 期間内の最大 DatabaseConnections がこの値「以下」なら未使用
+nat_bytes_max = 0                  # BytesInFromSource+BytesInFromDestination の期間合計がこの値「以下」なら未使用
+
+[actions]
+stop_wait_days = 7                 # CleanupStoppedAt から、この日数「以上」たったら Delete の候補にでき、削除もできる
+
+[pricing]
+use_price_list_api = true          # Stage 0 の結果で標準値を決める(後述)
+cache_ttl_hours = 24
