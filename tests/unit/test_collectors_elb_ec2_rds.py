@@ -59,7 +59,7 @@ def _tg_with_targets(
     )
     ids = [
         i["InstanceId"]
-        for i in ec2c.run_instances(ImageId="ami-12c6146b", MinCount=n, MaxCount=n)[
+        for i in ec2c.run_instances(ImageId="ami-12345678", MinCount=n, MaxCount=n)[
             "Instances"
         ]
     ]
@@ -87,7 +87,7 @@ def test_ac1_ac2_registry() -> None:
 def test_ac3_ac6_ec2_running() -> None:
     c = boto3.client("ec2", region_name=REGION)  # noqa: TID251
     inst = c.run_instances(
-        ImageId="ami-12c6146b", MinCount=1, MaxCount=1, InstanceType="t3.micro"
+        ImageId="ami-12345678", MinCount=1, MaxCount=1, InstanceType="t3.micro"
     )["Instances"][0]
     res = ec2.collect(ClientFactory("read"), REGION)
     assert res.skipped == ()
@@ -107,9 +107,9 @@ def test_ac3_ac6_ec2_running() -> None:
 @mock_aws
 def test_ac4_ac5_ec2_stopped_and_terminated() -> None:
     c = boto3.client("ec2", region_name=REGION)  # noqa: TID251
-    plain = c.run_instances(ImageId="ami-12c6146b", MinCount=1, MaxCount=1)
+    plain = c.run_instances(ImageId="ami-12345678", MinCount=1, MaxCount=1)
     cand = c.run_instances(
-        ImageId="ami-12c6146b",
+        ImageId="ami-12345678",
         MinCount=1,
         MaxCount=1,
         TagSpecifications=[
@@ -119,7 +119,7 @@ def test_ac4_ac5_ec2_stopped_and_terminated() -> None:
             }
         ],
     )
-    gone = c.run_instances(ImageId="ami-12c6146b", MinCount=1, MaxCount=1)
+    gone = c.run_instances(ImageId="ami-12345678", MinCount=1, MaxCount=1)
     pid = plain["Instances"][0]["InstanceId"]
     cid = cand["Instances"][0]["InstanceId"]
     gid = gone["Instances"][0]["InstanceId"]
@@ -188,7 +188,13 @@ def test_ac8_rds_available() -> None:
         "StorageType",
         "Iops",
     }
-    for k in ("Engine", "DBInstanceClass", "MultiAZ", "AllocatedStorage", "StorageType"):
+    for k in (
+        "Engine",
+        "DBInstanceClass",
+        "MultiAZ",
+        "AllocatedStorage",
+        "StorageType",
+    ):
         assert r.attrs[k] == d[k]
 
 

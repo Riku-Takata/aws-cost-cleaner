@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from botocore.exceptions import ClientError  # type: ignore[import-not-found]
+
 from aws_cost_cleaner.models import Resource, Skipped
 
 if TYPE_CHECKING:
@@ -54,7 +56,12 @@ def _count_registered_targets(client: Any, lb_arn: str) -> int:
     total = 0
     params: dict[str, Any] = {"LoadBalancerArn": lb_arn}
     while True:
-        resp = client.describe_target_groups(**params)
+        try:
+            resp = client.describe_target_groups(**params)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "TargetGroupNotFound":
+                break
+            raise
         for tg in resp.get("TargetGroups", []):
             health = client.describe_target_health(TargetGroupArn=tg["TargetGroupArn"])
             total += len(health.get("TargetHealthDescriptions", []))
