@@ -245,7 +245,25 @@ def test_ac11_rds_to_resource() -> None:
 
 
 @mock_aws
-def test_ac12_ac16_elb_alb_with_tags() -> None:
+def test_ac12_elb_alb_no_tg() -> None:
+    _, _, subnets = _vpc()
+    c = _elbv2()
+    _lb(c, subnets, Type="application")
+    res = elb.collect(ClientFactory("read"), REGION)
+    assert len(res.resources) == 1
+    r = res.resources[0]
+    d = c.describe_load_balancers()["LoadBalancers"][0]
+    assert r.resource_type == "load_balancer"
+    assert r.resource_id == d["LoadBalancerName"]
+    assert r.arn == d["LoadBalancerArn"]
+    assert r.state == d["State"]["Code"]
+    assert r.created_at == d["CreatedTime"]
+    assert r.attrs["Type"] == "application"
+    assert r.attrs["registered_target_count"] == 0
+
+
+@mock_aws
+def test_ac16_elb_alb_with_tags() -> None:
     _, _, subnets = _vpc()
     c = _elbv2()
     _lb(
@@ -258,40 +276,49 @@ def test_ac12_ac16_elb_alb_with_tags() -> None:
     assert res.skipped == ()
     assert len(res.resources) == 1
     r = res.resources[0]
-    d = c.describe_load_balancers()["LoadBalancers"][0]
-    assert r.resource_type == "load_balancer"
-    assert r.resource_id == d["LoadBalancerName"]
-    assert r.arn == d["LoadBalancerArn"]
-    assert r.state == d["State"]["Code"]
-    assert r.created_at == d["CreatedTime"]
-    assert r.attrs["Type"] == "application"
-    assert r.attrs["registered_target_count"] == 0
     assert r.tags == {"Name": "lb1", "Keep": "true"}
     assert r.name == "lb1"
 
 
+
 @mock_aws
-def test_ac13_ac14_elb_target_counts() -> None:
+def test_ac13_elb_single_target_group() -> None:
     ec2c, vpc, subnets = _vpc()
     c = _elbv2()
     arn = _lb(c, subnets, Type="application")
     _tg_with_targets(ec2c, c, vpc, arn, "tg1", 1, 80)
     res = elb.collect(ClientFactory("read"), REGION)
     assert res.resources[0].attrs["registered_target_count"] == 1
+
+
+@mock_aws
+def test_ac14_elb_two_target_groups() -> None:
+    ec2c, vpc, subnets = _vpc()
+    c = _elbv2()
+    arn = _lb(c, subnets, Type="application")
+    _tg_with_targets(ec2c, c, vpc, arn, "tg1", 1, 80)
     _tg_with_targets(ec2c, c, vpc, arn, "tg2", 2, 81)
     res = elb.collect(ClientFactory("read"), REGION)
     assert res.resources[0].attrs["registered_target_count"] == 3
 
 
 @mock_aws
-def test_ac15_ac17_elb_types() -> None:
+def test_ac15_elb_network_lb() -> None:
     _, _, subnets = _vpc()
     c = _elbv2()
     _lb(c, subnets, "nlb", Type="network")
-    _lb(c, subnets, "gwlb", Type="gateway")
     res = elb.collect(ClientFactory("read"), REGION)
     assert [r.resource_id for r in res.resources] == ["nlb"]
     assert res.resources[0].attrs["Type"] == "network"
+
+
+@mock_aws
+def test_ac17_elb_gateway_lb() -> None:
+    _, _, subnets = _vpc()
+    c = _elbv2()
+    _lb(c, subnets, "gwlb", Type="gateway")
+    res = elb.collect(ClientFactory("read"), REGION)
+    assert res.resources == ()
     assert res.skipped == (
         Skipped(
             resource_type="load_balancer",
@@ -300,6 +327,7 @@ def test_ac15_ac17_elb_types() -> None:
             skip_reason="unsupported_lb_type",
         ),
     )
+
 
 
 def test_ac18_elb_to_resource() -> None:
@@ -332,3 +360,5 @@ def test_ac19_read_allowlist() -> None:
     elb.collect(factory, REGION)
     ec2.collect(factory, REGION)
     rds.collect(factory, REGION)
+
+
