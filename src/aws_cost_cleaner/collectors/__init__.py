@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from aws_cost_cleaner.aws.session import ClientFactory
-from aws_cost_cleaner.collectors import ebs, eip, nat
+from aws_cost_cleaner.collectors import ebs, ec2, eip, elb, nat, rds
 from aws_cost_cleaner.models import Resource, ResourceType, Skipped
 
 
@@ -24,6 +24,9 @@ COLLECTORS: Mapping[ResourceType, CollectorFn] = {
     "ebs_volume": ebs.collect,
     "elastic_ip": eip.collect,
     "nat_gateway": nat.collect,
+    "load_balancer": elb.collect,
+    "ec2_instance": ec2.collect,
+    "rds_instance": rds.collect,
 }
 
 __all__ = [
