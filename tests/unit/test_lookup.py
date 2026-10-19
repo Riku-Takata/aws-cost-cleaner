@@ -591,6 +591,41 @@ def test_ac17_other_client_error(
 
 
 @mock_aws
+@pytest.mark.parametrize(
+    (
+        "resource_type",
+        "service",
+        "operation",
+        "expected_params",
+        "empty_response",
+        "not_found_code",
+        "res_id",
+        "arn",
+    ),
+    _STUBBER_PARAMS,
+)
+def test_ac19_params(
+    resource_type: ResourceType,
+    service: str,
+    operation: str,
+    expected_params: dict[str, Any],
+    empty_response: dict[str, Any],
+    not_found_code: str,
+    res_id: str,
+    arn: str | None,
+) -> None:
+    factory = ClientFactory("tag")
+    client = factory.client(service, REGION)
+    stubber = Stubber(client)
+    stubber.add_response(operation, empty_response, expected_params=expected_params)
+    with stubber:
+        item = _item(resource_type, res_id, arn=arn)
+        with pytest.raises(StateMismatchError):
+            fetch(factory, item)
+    stubber.assert_no_pending_responses()
+
+
+@mock_aws
 def test_ac20_only_describe_ops() -> None:
     _vol_id, item_ebs = _setup_ebs()
     _alloc_id1, item_eip1 = _setup_eip_unassociated()
